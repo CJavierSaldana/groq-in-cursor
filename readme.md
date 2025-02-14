@@ -22,7 +22,7 @@ This project is a FastAPI-based proxy for the OpenAI API. It forwards requests t
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/your-username/openai-api-proxy.git
+   git clone https://github.com/cjaviersaldana/openai-api-proxy.git
    cd openai-api-proxy
    ```
 
@@ -44,7 +44,7 @@ This project is a FastAPI-based proxy for the OpenAI API. It forwards requests t
 4. **Run the Application**
 
    ```bash
-   uvicorn main:app --reload
+   python main.py
    ```
 
    The application will be available at `http://127.0.0.1:8000`.
