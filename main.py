@@ -7,7 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from dotenv import load_dotenv
 from pathlib import Path
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -29,13 +36,17 @@ if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 LOGS_DIR = Path("logs")
 
 # Ensure logs directory exists
 LOGS_DIR.mkdir(exist_ok=True)
 
+# Log application start
+logger.info('Starting FastAPI application')
+
 async def save_request_response(request_data: Dict[str, Any], response_data: Dict[str, Any], endpoint: str):
-    """Save request and response data to a file with timestamp."""
+    logger.debug(f'Saving request and response for endpoint: {endpoint}')
     timestamp = int(time.time() * 1000)  # Get current timestamp in milliseconds
     filename = LOGS_DIR / f"{endpoint.replace('/', '_')}_{timestamp}.json"
     
@@ -53,6 +64,7 @@ async def save_request_response(request_data: Dict[str, Any], response_data: Dic
 
 @app.options("/{path:path}")
 async def options_request(path: str):
+    logger.debug(f'Handling OPTIONS request for path: {path}')
     """Handle OPTIONS requests and return available methods."""
     # Define available methods based on the endpoint
     available_methods = ["OPTIONS"]
@@ -93,6 +105,7 @@ async def options_request(path: str):
 
 @app.get("/models")
 async def get_models():
+    logger.info('Fetching available models from OpenAI API')
     """Get available models from OpenAI API."""
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -126,48 +139,69 @@ async def get_models():
             return response_data
             
         except httpx.HTTPError as e:
+            logger.error(f'Error getting models: {str(e)}')
             raise HTTPException(status_code=500, detail=f"Error getting models: {str(e)}")
 
 @app.post("/{path:path}")
 async def proxy_request(path: str, request: Request):
+    logger.info(f'Proxying request to path: {path}')
     """Proxy endpoint that forwards requests to OpenAI API and logs the interaction."""
     if path == "models":
+        logger.warning('Method not allowed for /models endpoint with POST')
         raise HTTPException(status_code=405, detail="Method not allowed. Use GET for /models endpoint")
         
-    # Get the full request body
     body = await request.json()
     
-    # Prepare headers
+    # Determine API key and base URL based on model
+    model = body.get("model")
+    if model == "qwen-2.5-coder-32b":
+        api_key = os.getenv("GROQ_API_KEY")
+        base_url = GROQ_BASE_URL
+    else:
+        api_key = OPENAI_API_KEY
+        base_url = OPENAI_BASE_URL
+
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    # Forward the request to OpenAI
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(
-                f"{OPENAI_BASE_URL}/{path}",
-                json=body,
-                headers=headers
-            )
-            
-            # Get response data
-            response_data = response.json()
-            
-            # Save request and response
-            await save_request_response(
-                request_data=body,
-                response_data=response_data,
-                endpoint=path
-            )
-            
-            # Return the OpenAI API response
-            return response_data
-            
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=500, detail=f"Error forwarding request: {str(e)}")
+    if path == "chat/completions" and body.get("stream") is True:
+        async def stream_response():
+            async with httpx.AsyncClient() as client:
+                async with client.stream("POST", f"{base_url}/{path}", json=body, headers=headers) as upstream_response:
+                    async for chunk in upstream_response.aiter_text():
+                        yield chunk
+        await save_request_response(
+            request_data=body,
+            response_data={"stream": True, "message": "streaming response"},
+            endpoint=path
+        )
+        return StreamingResponse(stream_response(), media_type="application/json")
+    else:
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(
+                    f"{base_url}/{path}",
+                    json=body,
+                    headers=headers
+                )
+                
+                response_data = response.json()
+                
+                await save_request_response(
+                    request_data=body,
+                    response_data=response_data,
+                    endpoint=path
+                )
+                
+                return response_data
+                
+            except httpx.HTTPError as e:
+                logger.error(f'Error forwarding request: {str(e)}')
+                raise HTTPException(status_code=500, detail=f"Error forwarding request: {str(e)}")
 
 if __name__ == "__main__":
+    logger.info('Running application with Uvicorn')
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000) 
